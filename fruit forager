@@ -1,0 +1,587 @@
+--============================================================
+-- Fruit Forager (Fluent Edition — Custom Watch List)
+--============================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
+
+--============================================================
+-- Wait for game + character to load
+--============================================================
+if not game:IsLoaded() then game.Loaded:Wait() end
+local localPlayer = Players.LocalPlayer
+if not localPlayer.Character then localPlayer.CharacterAdded:Wait() end
+task.wait(1)
+
+--============================================================
+-- Load Fluent
+--============================================================
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+--============================================================
+-- State
+--============================================================
+local selectFruits = {}
+local selectRarities = {}
+local startCollecting = false
+local startCollecting2 = false
+local collectAll = false
+local autoSellFull = false
+local autoSellLimit = false
+local autoSellTimed = false
+local sellLimit = 30
+local timerSeconds = 60
+local playerModsEnabled = false
+local noclip = false
+local walkSpeed = 16
+local jumpPower = 50
+local floatHeight = 2
+local selling = false
+
+local watchUsernames = {}
+local watcherEnabled = false
+local autoRejoinEnabled = false
+local rejoinAttempted = false
+
+--============================================================
+-- Helpers
+--============================================================
+local function getHRP()
+    local char = localPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getBackpackCount()
+    local bp = localPlayer:FindFirstChild("Backpack")
+    if not bp then return 0 end
+    local n = 0
+    for _, v in ipairs(bp:GetChildren()) do
+        if v:IsA("Tool") then n = n + 1 end
+    end
+    return n
+end
+
+--============================================================
+-- Core Logic
+--============================================================
+local function sellAll()
+    if selling then return end
+    local hrp = getHRP()
+    local sellSpot = workspace:FindFirstChild("SellSpot")
+    if not hrp or not sellSpot then return end
+
+    selling = true
+    local savedCFrame = hrp.CFrame
+    hrp.CFrame = sellSpot.CFrame
+    task.wait(0.4)
+
+    local prompt = sellSpot:FindFirstChild("SellAllPrompt")
+        or sellSpot:FindFirstChild("SellPrompt")
+        or sellSpot:FindFirstChildWhichIsA("ProximityPrompt", true)
+
+    if prompt then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+
+    task.wait(0.4)
+    local newHRP = getHRP()
+    if newHRP then newHRP.CFrame = savedCFrame end
+    selling = false
+end
+
+task.spawn(function()
+    while task.wait(1) do
+        if autoSellTimed then
+            task.wait(timerSeconds)
+            if autoSellTimed then sellAll() end
+        end
+        if autoSellFull and not selling and getBackpackCount() >= 50 then sellAll() end
+        if autoSellLimit and not selling and getBackpackCount() >= sellLimit then sellAll() end
+    end
+end)
+
+local function shouldCollect(model)
+    if collectAll then return true end
+    if startCollecting and table.find(selectFruits, model.Name) then return true end
+    if startCollecting2 then
+        for _, rar in ipairs(selectRarities) do
+            if string.find(model.Name, rar, 1, true) then return true end
+        end
+    end
+    return false
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if selling then continue end
+        if not (startCollecting or startCollecting2 or collectAll) then continue end
+        if not ProximityPromptService.Enabled then continue end
+
+        for _, model in ipairs(workspace:GetChildren()) do
+            if selling then break end
+            if not (startCollecting or startCollecting2 or collectAll) then break end
+
+            if model:IsA("Model") and model:FindFirstChild("Handle") then
+                local handle = model.Handle
+                local prompt = handle:FindFirstChild("PickUp")
+                if not prompt or not prompt:IsA("ProximityPrompt") then continue end
+                if not prompt.Enabled then continue end
+                if not shouldCollect(model) then continue end
+
+                local hrp = getHRP()
+                if not hrp then continue end
+
+                local origDist = prompt.MaxActivationDistance
+                pcall(function() prompt.MaxActivationDistance = 32 end)
+
+                hrp.CFrame = handle.CFrame
+                task.wait(0.15)
+
+                pcall(function() fireproximityprompt(prompt) end)
+
+                local startT = tick()
+                local picked = false
+                while tick() - startT < 1.2 do
+                    if not model.Parent then picked = true break end
+                    local bp = localPlayer:FindFirstChild("Backpack")
+                    if bp then
+                        for _, item in ipairs(bp:GetChildren()) do
+                            if item:IsA("Tool") and item.Name == model.Name then
+                                picked = true
+                                break
+                            end
+                        end
+                    end
+                    if picked then break end
+                    task.wait(0.1)
+                end
+
+                pcall(function() prompt.MaxActivationDistance = origDist end)
+
+                if not picked then
+                    warn("[FruitForager] Failed to pick up:", model.Name)
+                    task.wait(0.2)
+                else
+                    task.wait(0.1)
+                end
+            end
+        end
+    end
+end)
+
+RunService.Stepped:Connect(function()
+    local char = localPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    if playerModsEnabled then
+        humanoid.WalkSpeed = walkSpeed
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = jumpPower
+        humanoid.HipHeight = floatHeight
+        if noclip then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.CanCollide then
+                    part.CanCollide = false
+                end
+            end
+        end
+    else
+        humanoid.HipHeight = 2
+    end
+end)
+
+--============================================================
+-- Watcher Logic
+--============================================================
+local function isTargetUsername(name)
+    if name == localPlayer.Name then return false end
+    local lower = name:lower()
+    for _, target in ipairs(watchUsernames) do
+        if target:lower() == lower then return true end
+    end
+    return false
+end
+
+local function serverHop()
+    local placeId = game.PlaceId
+    local jobId = game.JobId
+    local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=100"
+
+    local ok, response = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(url))
+    end)
+
+    if not ok or not response or not response.data then return end
+
+    for _, server in ipairs(response.data) do
+        if server.playing < server.maxPlayers and server.id ~= jobId then
+            pcall(function() TeleportService:TeleportToPlaceInstance(placeId, server.id, localPlayer) end)
+            return
+        end
+    end
+end
+
+local function checkAndHop()
+    if not watcherEnabled then return end
+    if #watchUsernames == 0 then return end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isTargetUsername(player.Name) then
+            serverHop()
+            return
+        end
+    end
+end
+
+--============================================================
+-- UI: Fluent Window
+--============================================================
+local Window = Fluent:CreateWindow({
+    Title = "Fruit Forager 🍎",
+    SubTitle = "",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(620, 560),
+    Acrylic = true,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl,
+})
+
+local Tabs = {
+    Collector = Window:AddTab({ Title = "Collector", Icon = "apple" }),
+    Selling   = Window:AddTab({ Title = "Selling",   Icon = "dollar-sign" }),
+    Player    = Window:AddTab({ Title = "Player",    Icon = "user" }),
+    Graphics  = Window:AddTab({ Title = "Graphics",  Icon = "monitor" }),
+    Watcher   = Window:AddTab({ Title = "Watcher",   Icon = "eye" }),
+    Settings  = Window:AddTab({ Title = "Settings",  Icon = "settings" }),
+}
+
+local Options = Fluent.Options
+
+--============================================================
+-- Collector Tab
+--============================================================
+local fruitList = {
+    "Akdona Pomegranate [EPIC]", "Angel Apple [MYTHIC]", "Apple [COMMON]", "Banana [UNCOMMON]",
+    "Bergamot Orange [LEGENDARY]", "Blood Lime [EPIC]", "Blood Orange [EPIC]",
+    "Cactus Fruit [RARE]", "Carica Papaya [EPIC]", "Crimson Pear [RARE]",
+    "Dholka Pomegranate [LEGENDARY]", "Dragonfruit [RARE]", "Dread Dragonfruit [MYTHIC]",
+    "Embum Banana [RARE]", "Fig [RARE]", "Florentine Fig [LEGENDARY]", "Giant Kiwi [LEGENDARY]",
+    "Green Apple [UNCOMMON]", "Hardy Kiwi [RARE]", "Jambolan Plum [EPIC]", "Java Banana [EPIC]",
+    "Jingold Kiwi [EPIC]", "Kadota Fig [EPIC]", "Kigelia Worsboom [LEGENDARY]",
+    "Kiwano [UNIQUE]", "Kiwi [UNCOMMON]", "Kraken Kiwi [MYTHIC]", "Lemon [UNCOMMON]",
+    "Lime [RARE]", "Lychee [UNIQUE]", "Madu Tarap [EPIC]", "Mangosteen [UNIQUE]",
+    "Mutated Dragonfruit [LEGENDARY]", "Opuntia Fruit [EPIC]", "Orange [RARE]",
+    "Palora Dragonfruit [EPIC]", "Papaya [RARE]", "Pear [UNCOMMON]", "Pineapple [RARE]",
+    "Pink Lemon [LEGENDARY]", "Plum [RARE]", "Pomegranate [RARE]", "Sugar Apple [EPIC]",
+    "Susu Tarap [LEGENDARY]", "Tarap [RARE]", "Tourmaline Tarap [MYTHIC]", "Worsboom [RARE]",
+    "Xylophia Worsboom [EPIC]", "Cacao [RARE]", "Criollo Cacao [EPIC]",
+    "Trinitario Cacao [LEGENDARY]",
+}
+
+Tabs.Collector:AddSection("Specific Fruits")
+local FruitDropdown = Tabs.Collector:AddDropdown("SelectedFruits", {
+    Title = "Select Fruits",
+    Description = "You can select multiple fruits",
+    Values = fruitList,
+    Multi = true,
+    Default = {},
+})
+
+FruitDropdown:OnChanged(function(selected)
+    local chosen = {}
+    for name, state in pairs(selected) do
+        if state then table.insert(chosen, name) end
+    end
+    selectFruits = chosen
+end)
+
+Tabs.Collector:AddToggle("CollectByFruit", { Title = "Start collecting (by fruit)", Default = false }):OnChanged(function(v) startCollecting = v end)
+Tabs.Collector:AddSection("Fruit Rarities")
+local RarityDropdown = Tabs.Collector:AddDropdown("SelectedRarities", {
+    Title = "Select Rarities",
+    Values = { "[COMMON]", "[UNCOMMON]", "[RARE]", "[EPIC]", "[LEGENDARY]", "[MYTHIC]", "[UNIQUE]" },
+    Multi = true,
+    Default = {},
+})
+
+RarityDropdown:OnChanged(function(selected)
+    local chosen = {}
+    for name, state in pairs(selected) do
+        if state then table.insert(chosen, name) end
+    end
+    selectRarities = chosen
+end)
+
+Tabs.Collector:AddToggle("CollectByRarity", { Title = "Start collecting (by rarity)", Default = false }):OnChanged(function(v) startCollecting2 = v end)
+Tabs.Collector:AddSection("All")
+Tabs.Collector:AddToggle("CollectAll", { Title = "Collect all fruits", Default = false }):OnChanged(function(v) collectAll = v end)
+
+--============================================================
+-- Selling Tab
+--============================================================
+Tabs.Selling:AddSection("Full Backpack Auto Sell")
+Tabs.Selling:AddToggle("AutoSellFull", { Title = "Auto Sell When Backpack is Full", Default = false }):OnChanged(function(v) autoSellFull = v end)
+Tabs.Selling:AddSection("Custom Limit Auto Sell")
+Tabs.Selling:AddToggle("AutoSellLimit", { Title = "Auto Sell at Storage Limit", Default = false }):OnChanged(function(v) autoSellLimit = v end)
+Tabs.Selling:AddSlider("SellLimit", { Title = "Storage Limit Amount", Min = 1, Max = 100, Default = 30, Rounding = 0 }):OnChanged(function(v) sellLimit = v end)
+Tabs.Selling:AddSection("Timed Sell")
+Tabs.Selling:AddToggle("AutoSellTimed", { Title = "Enable Timed Sell", Default = false }):OnChanged(function(v) autoSellTimed = v end)
+Tabs.Selling:AddSlider("TimerSeconds", { Title = "Timer (Seconds)", Min = 1, Max = 500, Default = 60, Rounding = 0 }):OnChanged(function(v) timerSeconds = v end)
+Tabs.Selling:AddSection("Manual Controls")
+Tabs.Selling:AddButton({ Title = "Manual Sell All", Callback = function() sellAll() end })
+
+--============================================================
+-- Player Tab
+--============================================================
+Tabs.Player:AddSection("Master Switch")
+Tabs.Player:AddToggle("PlayerMods", { Title = "Enable Player Mods", Default = false }):OnChanged(function(v) playerModsEnabled = v end)
+Tabs.Player:AddSection("Movement Stats")
+Tabs.Player:AddSlider("WalkSpeed", { Title = "Walk Speed", Min = 16, Max = 300, Default = 16, Rounding = 0 }):OnChanged(function(v) walkSpeed = v end)
+Tabs.Player:AddSlider("JumpPower", { Title = "Jump Power", Min = 50, Max = 500, Default = 50, Rounding = 0 }):OnChanged(function(v) jumpPower = v end)
+Tabs.Player:AddSection("Extra Mods")
+Tabs.Player:AddToggle("Noclip", { Title = "Noclip", Default = false }):OnChanged(function(v) noclip = v end)
+Tabs.Player:AddSlider("FloatHeight", { Title = "Float Height", Min = 2, Max = 50, Default = 2, Rounding = 0 }):OnChanged(function(v) floatHeight = v end)
+
+--============================================================
+-- Graphics Tab
+--============================================================
+Tabs.Graphics:AddSection("World Optimization")
+Tabs.Graphics:AddToggle("SolidTextures", { Title = "Solid Color Textures", Default = false }):OnChanged(function(v)
+    if v then
+        for _, p in ipairs(workspace:GetDescendants()) do
+            if p:IsA("BasePart") then p.Material = Enum.Material.SmoothPlastic end
+        end
+    end
+end)
+Tabs.Graphics:AddButton({
+    Title = "Delete All Textures & Decals",
+    Callback = function()
+        for _, p in ipairs(workspace:GetDescendants()) do
+            if p:IsA("Texture") or p:IsA("Decal") then p:Destroy() end
+        end
+    end,
+})
+
+Tabs.Graphics:AddToggle("ReducedFog", { Title = "Reduced Render Distance (Fog)", Default = false }):OnChanged(function(v)
+    local lighting = game:GetService("Lighting")
+    lighting.FogEnd = v and 150 or 100000
+end)
+
+Tabs.Graphics:AddSection("Extreme Optimization")
+local screenGui = Instance.new("ScreenGui")
+screenGui.IgnoreGuiInset = true
+local whiteFrame = Instance.new("Frame")
+whiteFrame.Size = UDim2.new(1, 0, 1, 0)
+whiteFrame.BackgroundColor3 = Color3.new(1, 1, 1)
+whiteFrame.Parent = screenGui
+
+Tabs.Graphics:AddToggle("WhiteScreen", { Title = "White Screen (Disable Rendering)", Default = false }):OnChanged(function(v)
+    pcall(function() RunService:Set3dRenderingEnabled(not v) end)
+    if v then screenGui.Parent = game:GetService("CoreGui") else screenGui.Parent = nil end
+end)
+
+local hiddenGuis = {}
+Tabs.Graphics:AddToggle("HideGameGui", { Title = "Hide Game GUI", Default = false }):OnChanged(function(v)
+    if v then
+        for _, gui in ipairs(localPlayer.PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled then
+                hiddenGuis[gui] = true
+                gui.Enabled = false
+            end
+        end
+    else
+        for gui in pairs(hiddenGuis) do
+            if gui and gui.Parent then gui.Enabled = true end
+        end
+        table.clear(hiddenGuis)
+    end
+end)
+
+Tabs.Graphics:AddSection("Auto Reconnect")
+Tabs.Graphics:AddToggle("AutoRejoinEnabled", { Title = "Enable Auto Rejoin", Default = false }):OnChanged(function(v) 
+    autoRejoinEnabled = v 
+    if not v then rejoinAttempted = false end
+end)
+
+GuiService.ErrorMessageChanged:Connect(function(errorMessage)
+    if not autoRejoinEnabled or rejoinAttempted or not errorMessage or errorMessage == "" then return end
+    rejoinAttempted = true
+    task.wait(1)
+    local ok = pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, localPlayer) end)
+    if not ok then pcall(function() TeleportService:Teleport(game.PlaceId, localPlayer) end) end
+end)
+
+--============================================================
+-- Watcher Tab (Custom Text-Based System)
+--============================================================
+Tabs.Watcher:AddSection("Username Watch List")
+
+local SaveStringInput
+local AddUsernameInput
+
+SaveStringInput = Tabs.Watcher:AddInput("SavedList", {
+    Title = "Saved List",
+    Default = "",
+    Visible = false,
+    Callback = function(val)
+        if val and val ~= "" then
+            watchUsernames = {}
+            for name in string.gmatch(val, "([^,]+)") do
+                table.insert(watchUsernames, name)
+            end
+        end
+    end
+})
+
+local listLabel = Tabs.Watcher:AddParagraph({
+    Title = "Current Watched Usernames",
+    Content = "No usernames added yet.\n",
+})
+
+local function updateUIAndSave()
+    if #watchUsernames == 0 then
+        listLabel:SetDesc("No usernames added yet.\n")
+    else
+        local text = ""
+        for i, name in ipairs(watchUsernames) do
+            text = text .. i .. ". " .. name .. "\n"
+        end
+        listLabel:SetDesc(text)
+    end
+
+    local saveStr = table.concat(watchUsernames, ",")
+    if SaveStringInput then
+        SaveStringInput:SetValue(saveStr)
+    end
+end
+
+AddUsernameInput = Tabs.Watcher:AddInput("NewUsername", {
+    Title = "Add Username",
+    Placeholder = "Type username and press Enter",
+    Finished = true,
+    Callback = function(value)
+        value = value:gsub("%s+", "")
+        if value == "" then return end
+        for _, existing in ipairs(watchUsernames) do
+            if existing:lower() == value:lower() then 
+                AddUsernameInput:SetValue("")
+                return 
+            end
+        end
+        table.insert(watchUsernames, value)
+        updateUIAndSave()
+        AddUsernameInput:SetValue("")
+    end,
+})
+
+Tabs.Watcher:AddInput("RemoveUsername", {
+    Title = "Remove Username",
+    Placeholder = "Type exact username to remove",
+    Finished = true,
+    Callback = function(value)
+        value = value:gsub("%s+", "")
+        if value == "" then return end
+        for i, existing in ipairs(watchUsernames) do
+            if existing:lower() == value:lower() then
+                table.remove(watchUsernames, i)
+                break
+            end
+        end
+        updateUIAndSave()
+    end,
+})
+
+Tabs.Watcher:AddButton({
+    Title = "Delete All Usernames",
+    Callback = function()
+        watchUsernames = {}
+        updateUIAndSave()
+        if SaveStringInput then SaveStringInput:SetValue("") end
+        if AddUsernameInput then AddUsernameInput:SetValue("") end
+    end,
+})
+
+Tabs.Watcher:AddToggle("WatcherEnabled", { Title = "Enable Username Watcher", Default = false }):OnChanged(function(v) watcherEnabled = v end)
+Tabs.Watcher:AddButton({ Title = "Check Now", Callback = function() checkAndHop() end })
+
+Tabs.Watcher:AddSection("Info")
+Tabs.Watcher:AddParagraph({
+    Title = "How it works",
+    Content = "If a watched username is in your server, you'll be teleported to a different server. You will never be hopped if you are on one of the watched usernames yourself.",
+})
+
+--============================================================
+-- Settings Tab
+--============================================================
+Tabs.Settings:AddSection("Community")
+Tabs.Settings:AddButton({
+    Title = "Join the Discord Server",
+    Callback = function()
+        local setClip = setclipboard or toclipboard or set_clipboard
+        if setClip then setClip("https://discord.gg/YWs5c7T6ZM") end
+    end,
+})
+
+Tabs.Settings:AddSection("Backpack Viewer")
+local BackpackDropdown = Tabs.Settings:AddDropdown("BackpackView", {
+    Title = "Current Backpack Items",
+    Values = { "Empty" },
+    Multi = false,
+})
+Tabs.Settings:AddButton({
+    Title = "Refresh Inventory View",
+    Callback = function()
+        local bp = localPlayer:FindFirstChild("Backpack")
+        local names = {}
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") then table.insert(names, t.Name) end
+            end
+        end
+        if #names == 0 then table.insert(names, "Backpack is Empty") end
+        BackpackDropdown:Refresh(names)
+    end,
+})
+
+--============================================================
+-- SaveManager setup
+--============================================================
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+InterfaceManager:SetFolder("FruitForager")
+SaveManager:SetFolder("FruitForager/Main")
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+
+Window:SelectTab(1)
+
+--============================================================
+-- Auto-load config
+--============================================================
+task.defer(function()
+    pcall(function() SaveManager:LoadAutoloadConfig() end)
+    
+    local saved = Options.SavedList and Options.SavedList.Value
+    if saved and saved ~= "" then
+        watchUsernames = {}
+        for name in string.gmatch(saved, "([^,]+)") do
+            table.insert(watchUsernames, name)
+        end
+    end
+    updateUIAndSave()
+
+    task.wait(15)
+    if watcherEnabled and #watchUsernames > 0 then
+        checkAndHop()
+    end
+end)
